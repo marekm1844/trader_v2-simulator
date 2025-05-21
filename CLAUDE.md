@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-The trader_v2-simulator is a Go-based cryptocurrency trading simulator that uses historical price data to simulate trading strategies. The project focuses on SOL-USD trading pairs with both daily and hourly price candles.
+The trader_v2-simulator is a Go-based cryptocurrency trading simulator that uses historical price data to simulate daily and hourly ticks using websocket.
+For websocet we are using gorilla library.
+The project focuses on SOL-USD trading pairs with both daily and hourly price candles.
 
 ## Repository Structure
 
@@ -55,6 +57,7 @@ The simulator works with cryptocurrency price data in JSON format:
 - Metadata tracks symbol information, date ranges, and data counts
 
 Example metadata structure:
+
 ```json
 {
   "symbol": "SOL-USD",
