@@ -2,13 +2,11 @@ package dataprovider
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/marekm1844/trader_v2-simulator/internal/models"
 	"github.com/marekm1844/trader_v2-simulator/internal/simulator"
 )
 

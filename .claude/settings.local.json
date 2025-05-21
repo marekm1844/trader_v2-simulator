@@ -14,7 +14,12 @@
       "Bash(go test:*)",
       "Bash(go get:*)",
       "Bash(go install:*)",
-      "Bash(golangci-lint run:*)"
+      "Bash(golangci-lint run:*)",
+      "Bash(go run:*)",
+      "Bash(grep:*)",
+      "Bash(go build:*)",
+      "Bash(cp:*)",
+      "Bash(sed:*)"
     ],
     "deny": []
   }

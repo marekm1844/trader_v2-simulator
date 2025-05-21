@@ -48,3 +48,5 @@ configs/
 .claude/
 .Tasks/
 *CLAUDE.md
+
+simulator
