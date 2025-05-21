@@ -48,10 +48,48 @@ go build -o simulator
 
 ## HTTP Endpoints
 
-- `GET /status`: Returns the current simulator status, including:
-  - Selected timeframe
-  - Symbol
-  - Date range
+### Status Endpoint
+
+- `GET /api/status`: Returns detailed information about the current emitter state
+  - Method: GET
+  - Response: JSON object with the following fields:
+    - `symbol`: Trading symbol (e.g., "SOL-USD")
+    - `timeframe`: Candle timeframe ("daily" or "hourly")
+    - `interval`: Time between candles (e.g., "1s", "500ms")
+    - `start_time`: Start date for candles (RFC3339 format)
+    - `end_time`: End date for candles (RFC3339 format)
+    - `is_running`: Boolean indicating if streaming is active
+
+### Stream Control Endpoints
+
+- `POST /api/stream/start`: Start or restart streaming with specified parameters
+  - Method: POST
+  - Request Body (JSON):
+    ```json
+    {
+      "timeframe": "daily",       // Optional: "daily" or "hourly"
+      "interval": "500ms",        // Optional: Duration between candles
+      "start_date": "2025-05-01", // Optional: Start date (YYYY-MM-DD)
+      "end_date": "2025-05-10"    // Optional: End date (YYYY-MM-DD)
+    }
+    ```
+  - Response: JSON object with success status and message
+    ```json
+    {
+      "success": true,
+      "message": "Started streaming daily candles from 2025-05-01 to 2025-05-10 at 500ms intervals"
+    }
+    ```
+
+- `POST /api/stream/stop`: Stop the current streaming session
+  - Method: POST
+  - Response: JSON object with success status and message
+    ```json
+    {
+      "success": true,
+      "message": "Streaming stopped successfully"
+    }
+    ```
 
 ## Data Structure
 

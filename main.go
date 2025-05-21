@@ -2,13 +2,16 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -23,7 +26,12 @@ type ConsoleEmitter struct {
 	interval     time.Duration
 	dataProvider simulator.DataProvider
 	endTime      time.Time      // End time to stop at
-	stopCh       chan struct{}
+	startTime    time.Time      // Start time for candles
+	isRunning    bool           // Flag to track if emitter is currently running
+	mu           sync.Mutex     // Mutex for thread-safe operations
+	stopCh       chan struct{}  // Channel to signal stop
+	ctx          context.Context
+	cancel       context.CancelFunc
 }
 
 // NewConsoleEmitter creates a new console candle emitter
@@ -32,50 +40,133 @@ func NewConsoleEmitter(
 	timeframe simulator.TimeFrame, 
 	interval time.Duration, 
 	dataProvider simulator.DataProvider,
+	startTime time.Time,
 	endTime time.Time,
 ) *ConsoleEmitter {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &ConsoleEmitter{
 		timeframe:    timeframe,
 		symbol:       symbol,
 		interval:     interval,
 		dataProvider: dataProvider,
+		startTime:    startTime,
 		endTime:      endTime,
+		isRunning:    false,
 		stopCh:       make(chan struct{}),
+		ctx:          ctx,
+		cancel:       cancel,
 	}
 }
 
-// Start begins emitting candles at the specified interval
-func (c *ConsoleEmitter) Start(ctx context.Context, startTime time.Time) {
+// GetStatus returns the current status of the emitter
+func (c *ConsoleEmitter) GetStatus() map[string]interface{} {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	
+	return map[string]interface{}{
+		"symbol":       c.symbol,
+		"timeframe":    c.timeframe,
+		"interval":     c.interval.String(),
+		"start_time":   c.startTime.Format(time.RFC3339),
+		"end_time":     c.endTime.Format(time.RFC3339),
+		"is_running":   c.isRunning,
+	}
+}
+
+// UpdateParameters updates the emitter parameters without restarting
+func (c *ConsoleEmitter) UpdateParameters(
+	timeframe simulator.TimeFrame,
+	interval time.Duration,
+	startTime time.Time,
+	endTime time.Time,
+) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	
+	c.timeframe = timeframe
+	c.interval = interval
+	c.startTime = startTime
+	c.endTime = endTime
+}
+
+// StartEmitter begins emitting candles at the specified interval
+func (c *ConsoleEmitter) StartEmitter() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	
+	if c.isRunning {
+		return fmt.Errorf("emitter is already running")
+	}
+	
+	// Reset context and stop channel
+	if c.ctx.Err() != nil {
+		c.ctx, c.cancel = context.WithCancel(context.Background())
+		c.stopCh = make(chan struct{})
+	}
+	
+	c.isRunning = true
+	
+	// Start in a separate goroutine
+	go c.run()
+	
+	return nil
+}
+
+// run is the internal method that handles the actual emission
+func (c *ConsoleEmitter) run() {
+	// Using local copies of parameters to avoid locking inside the loop
+	c.mu.Lock()
+	symbol := c.symbol
+	timeframe := c.timeframe
+	interval := c.interval
+	initialTime := c.startTime
+	endTime := c.endTime
+	ctx := c.ctx
+	c.mu.Unlock()
+	
 	log.Printf("Starting candle emitter for %s [%s] at %v intervals", 
-		c.symbol, c.timeframe, c.interval)
+		symbol, timeframe, interval)
 	
 	// Get the data range
-	dataStart, dataEnd, err := c.dataProvider.GetDataRange(ctx, c.symbol, c.timeframe)
+	dataStart, dataEnd, err := c.dataProvider.GetDataRange(ctx, symbol, timeframe)
 	if err != nil {
 		log.Printf("Error getting data range: %v", err)
+		c.setRunningState(false)
 		return
 	}
 	
 	log.Printf("Data available from %s to %s", 
 		dataStart.Format("2006-01-02"), dataEnd.Format("2006-01-02"))
 	
-	// Use the later of dataStart and startTime
-	currentTime := startTime
-	if dataStart.After(startTime) {
+	// Use the later of dataStart and initialTime
+	currentTime := initialTime
+	if dataStart.After(initialTime) {
 		currentTime = dataStart
+		log.Printf("Using start time %s (earliest available data)", currentTime.Format("2006-01-02"))
 	}
 	
 	// Start ticker to emit candles
-	ticker := time.NewTicker(c.interval)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	
 	for {
 		select {
 		case <-ticker.C:
+			// Get fresh values in case they were updated
+			c.mu.Lock()
+			timeframe = c.timeframe
+			endTime = c.endTime
+			interval = c.interval
+			c.mu.Unlock()
+			
+			// Update ticker if interval changed
+			ticker.Reset(interval)
+			
 			// Check if we've reached the user-specified end time
-			if currentTime.After(c.endTime) {
+			if currentTime.After(endTime) {
 				log.Printf("Reached specified end time: %s, stopping emitter", 
-					c.endTime.Format("2006-01-02 15:04:05"))
+					endTime.Format("2006-01-02 15:04:05"))
+				c.setRunningState(false)
 				return
 			}
 			
@@ -89,7 +180,7 @@ func (c *ConsoleEmitter) Start(ctx context.Context, startTime time.Time) {
 			var windowSize time.Duration
 			var timeAdvance time.Duration
 			
-			if c.timeframe == simulator.TimeFrameHourly {
+			if timeframe == simulator.TimeFrameHourly {
 				windowSize = 2 * time.Hour   // 2-hour window for hourly candles
 				timeAdvance = 1 * time.Hour  // Advance by 1 hour for hourly candles
 			} else {
@@ -98,7 +189,7 @@ func (c *ConsoleEmitter) Start(ctx context.Context, startTime time.Time) {
 			}
 			
 			endWindow := currentTime.Add(windowSize)
-			candles, err := c.dataProvider.GetCandles(ctx, c.symbol, c.timeframe, 
+			candles, err := c.dataProvider.GetCandles(ctx, symbol, timeframe, 
 				currentTime, endWindow)
 			if err != nil {
 				log.Printf("Error getting candles: %v", err)
@@ -115,7 +206,7 @@ func (c *ConsoleEmitter) Start(ctx context.Context, startTime time.Time) {
 			// Emit the first candle
 			candle := candles[0]
 			log.Printf("CANDLE [%s] %s: O: %.2f, H: %.2f, L: %.2f, C: %.2f, V: %.2f",
-				c.timeframe, candle.Timestamp.Format(time.RFC3339),
+				timeframe, candle.Timestamp.Format(time.RFC3339),
 				candle.Open, candle.High, candle.Low, candle.Close, candle.Volume)
 			
 			// Move to the next time period
@@ -123,17 +214,245 @@ func (c *ConsoleEmitter) Start(ctx context.Context, startTime time.Time) {
 			
 		case <-c.stopCh:
 			log.Println("Stopping candle emitter")
+			c.setRunningState(false)
 			return
 		case <-ctx.Done():
 			log.Println("Context canceled, stopping candle emitter")
+			c.setRunningState(false)
 			return
 		}
 	}
 }
 
+// setRunningState updates the running state thread-safely
+func (c *ConsoleEmitter) setRunningState(running bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.isRunning = running
+}
+
 // Stop halts candle emission
-func (c *ConsoleEmitter) Stop() {
+func (c *ConsoleEmitter) Stop() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	
+	if !c.isRunning {
+		return fmt.Errorf("emitter is not running")
+	}
+	
+	// Cancel context and close stop channel
+	c.cancel()
 	close(c.stopCh)
+	
+	return nil
+}
+
+// setupAPIEndpoints configures the HTTP API endpoints
+func setupAPIEndpoints(mux *http.ServeMux, emitter *ConsoleEmitter, dataProvider simulator.DataProvider, defaultSymbol string) {
+	// Status endpoint
+	mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
+		status := emitter.GetStatus()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(status)
+	})
+	
+	// Start streaming endpoint
+	mux.HandleFunc("/api/stream/start", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed, use POST", http.StatusMethodNotAllowed)
+			return
+		}
+		
+		// Parse request parameters
+		var req struct {
+			Timeframe  string `json:"timeframe,omitempty"`
+			Interval   string `json:"interval,omitempty"`
+			StartDate  string `json:"start_date,omitempty"`
+			EndDate    string `json:"end_date,omitempty"`
+		}
+		
+		// Default response
+		response := map[string]interface{}{
+			"success": false,
+			"message": "",
+		}
+		
+		// Set content type for response
+		w.Header().Set("Content-Type", "application/json")
+		
+		// Try to decode the request body
+		if r.Body != nil {
+			err := json.NewDecoder(r.Body).Decode(&req)
+			if err != nil && err != io.EOF {
+				response["message"] = "Invalid request format: " + err.Error()
+				json.NewEncoder(w).Encode(response)
+				return
+			}
+		}
+		
+		// Get data range to determine available dates
+		dataStart, dataEnd, err := dataProvider.GetDataRange(r.Context(), defaultSymbol, simulator.TimeFrameDaily)
+		if err != nil {
+			response["message"] = "Failed to get data range: " + err.Error()
+			json.NewEncoder(w).Encode(response)
+			return
+		}
+		
+		// Get current parameters
+		currentStatus := emitter.GetStatus()
+		
+		// Parse timeframe
+		var timeframe simulator.TimeFrame
+		if req.Timeframe != "" {
+			switch req.Timeframe {
+			case "daily":
+				timeframe = simulator.TimeFrameDaily
+			case "hourly":
+				timeframe = simulator.TimeFrameHourly
+			default:
+				response["message"] = "Invalid timeframe, must be 'daily' or 'hourly'"
+				json.NewEncoder(w).Encode(response)
+				return
+			}
+		} else {
+			// Use current timeframe
+			timeframe = simulator.TimeFrame(currentStatus["timeframe"].(string))
+		}
+		
+		// Parse interval
+		var interval time.Duration
+		if req.Interval != "" {
+			parsedInterval, err := time.ParseDuration(req.Interval)
+			if err != nil {
+				response["message"] = "Invalid interval format (use 500ms, 1s, etc.): " + err.Error()
+				json.NewEncoder(w).Encode(response)
+				return
+			}
+			interval = parsedInterval
+		} else {
+			// Use current interval
+			intervalStr := currentStatus["interval"].(string)
+			interval, _ = time.ParseDuration(intervalStr)
+		}
+		
+		// Parse start date
+		var startTime time.Time
+		if req.StartDate != "" {
+			parsedStartDate, err := time.Parse("2006-01-02", req.StartDate)
+			if err != nil {
+				response["message"] = "Invalid start_date format. Use YYYY-MM-DD: " + err.Error()
+				json.NewEncoder(w).Encode(response)
+				return
+			}
+			startTime = parsedStartDate
+			
+			// Ensure start date is within available data range
+			if startTime.Before(dataStart) {
+				log.Printf("Warning: Specified start_date %s is before earliest available data (%s). Using earliest available date.",
+					startTime.Format("2006-01-02"), dataStart.Format("2006-01-02"))
+				startTime = dataStart
+			}
+			if startTime.After(dataEnd) {
+				response["message"] = fmt.Sprintf("Error: Specified start_date %s is after latest available data (%s)",
+					startTime.Format("2006-01-02"), dataEnd.Format("2006-01-02"))
+				json.NewEncoder(w).Encode(response)
+				return
+			}
+		} else {
+			// Use current start time
+			startTimeStr := currentStatus["start_time"].(string)
+			startTime, _ = time.Parse(time.RFC3339, startTimeStr)
+		}
+		
+		// Parse end date
+		var endTime time.Time
+		if req.EndDate != "" {
+			parsedEndDate, err := time.Parse("2006-01-02", req.EndDate)
+			if err != nil {
+				response["message"] = "Invalid end_date format. Use YYYY-MM-DD: " + err.Error()
+				json.NewEncoder(w).Encode(response)
+				return
+			}
+			endTime = parsedEndDate
+			
+			// Ensure end date is within available data range
+			if endTime.After(dataEnd) {
+				log.Printf("Warning: Specified end_date %s is after latest available data (%s). Using latest available date.",
+					endTime.Format("2006-01-02"), dataEnd.Format("2006-01-02"))
+				endTime = dataEnd
+			}
+			if endTime.Before(dataStart) {
+				response["message"] = fmt.Sprintf("Error: Specified end_date %s is before earliest available data (%s)",
+					endTime.Format("2006-01-02"), dataStart.Format("2006-01-02"))
+				json.NewEncoder(w).Encode(response)
+				return
+			}
+			if endTime.Before(startTime) {
+				response["message"] = fmt.Sprintf("Error: end_date (%s) must be after start_date (%s)",
+					endTime.Format("2006-01-02"), startTime.Format("2006-01-02"))
+				json.NewEncoder(w).Encode(response)
+				return
+			}
+		} else {
+			// Use current end time
+			endTimeStr := currentStatus["end_time"].(string)
+			endTime, _ = time.Parse(time.RFC3339, endTimeStr)
+		}
+		
+		// Update emitter parameters
+		emitter.UpdateParameters(timeframe, interval, startTime, endTime)
+		
+		// If emitter is running, stop it first
+		if currentStatus["is_running"].(bool) {
+			if err := emitter.Stop(); err != nil {
+				response["message"] = "Failed to stop current streaming: " + err.Error()
+				json.NewEncoder(w).Encode(response)
+				return
+			}
+		}
+		
+		// Start the emitter
+		if err := emitter.StartEmitter(); err != nil {
+			response["message"] = "Failed to start streaming: " + err.Error()
+			json.NewEncoder(w).Encode(response)
+			return
+		}
+		
+		// Success response
+		response["success"] = true
+		response["message"] = fmt.Sprintf("Started streaming %s candles from %s to %s at %v intervals",
+			timeframe, startTime.Format("2006-01-02"), endTime.Format("2006-01-02"), interval)
+		json.NewEncoder(w).Encode(response)
+	})
+	
+	// Stop streaming endpoint
+	mux.HandleFunc("/api/stream/stop", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed, use POST", http.StatusMethodNotAllowed)
+			return
+		}
+		
+		// Default response
+		response := map[string]interface{}{
+			"success": false,
+			"message": "",
+		}
+		
+		// Set content type for response
+		w.Header().Set("Content-Type", "application/json")
+		
+		// Stop the emitter
+		if err := emitter.Stop(); err != nil {
+			response["message"] = "Failed to stop streaming: " + err.Error()
+			json.NewEncoder(w).Encode(response)
+			return
+		}
+		
+		// Success response
+		response["success"] = true
+		response["message"] = "Streaming stopped successfully"
+		json.NewEncoder(w).Encode(response)
+	})
 }
 
 func main() {
@@ -244,30 +563,25 @@ func main() {
 	
 	log.Printf("Using date range: %s to %s", initialTime.Format("2006-01-02"), endTime.Format("2006-01-02"))
 	
-	// Create context that can be canceled
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	
 	// Create a console emitter for the selected timeframe
 	emitter := NewConsoleEmitter(
 		symbol,
 		timeframe, 
 		*tickInterval,
 		dataProvider,
+		initialTime,
 		endTime,
 	)
 	
-	// Start the emitter in a goroutine
-	go emitter.Start(ctx, initialTime)
+	// Start the emitter
+	if err := emitter.StartEmitter(); err != nil {
+		log.Printf("Failed to start emitter: %v", err)
+	}
 	
 	log.Println("Simulator started. Press Ctrl+C to stop.")
 	
-	// Create a status endpoint for checking if the server is running
-	http.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
-		statusMsg := fmt.Sprintf("Trading Simulator Running - Streaming %s candles for %s from %s to %s", 
-			timeframe, symbol, initialTime.Format("2006-01-02"), endTime.Format("2006-01-02"))
-		w.Write([]byte(statusMsg))
-	})
+	// Create API endpoints for controlling the simulator
+	setupAPIEndpoints(http.DefaultServeMux, emitter, dataProvider, symbol)
 	
 	// Start the HTTP server in a goroutine
 	go func() {
@@ -285,9 +599,6 @@ func main() {
 	
 	// Stop all components
 	log.Println("Stopping simulator...")
-	
-	// Cancel the context to signal all goroutines to stop
-	cancel()
 	
 	// Explicitly stop the emitter
 	emitter.Stop()
