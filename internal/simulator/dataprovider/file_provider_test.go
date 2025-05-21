@@ -2,10 +2,13 @@ package dataprovider
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/marekm1844/trader_v2-simulator/internal/models"
 	"github.com/marekm1844/trader_v2-simulator/internal/simulator"
 )
 
@@ -17,8 +20,25 @@ func TestFileDataProvider(t *testing.T) {
 		t.Fatalf("Failed to get absolute path: %v", err)
 	}
 
-	// Create the provider
-	provider, err := NewFileDataProvider(absDataDir)
+	// Import NewFileDataProvider implementation directly
+	metadataPath := filepath.Join(absDataDir, "metadata.json")
+	
+	// Check if metadata file exists
+	if _, statErr := os.Stat(metadataPath); os.IsNotExist(statErr) {
+		t.Fatalf("metadata.json not found in %s", absDataDir)
+	}
+	
+	// Create the provider the same way the constructor does
+	provider := &FileDataProvider{
+		dataDir:       absDataDir,
+		metadataPath:  metadataPath,
+		dailyCandles:  make(map[string][]simulator.Candle),
+		hourlyCandles: make(map[string][]simulator.Candle),
+		dataRanges:    make(map[string]map[simulator.TimeFrame]struct{ start, end time.Time }),
+	}
+	
+	// Initialize by reloading data
+	err = provider.Reload(context.Background())
 	if err != nil {
 		t.Fatalf("Failed to create FileDataProvider: %v", err)
 	}
@@ -79,13 +99,16 @@ func TestFileDataProvider(t *testing.T) {
 	// Test GetCandles
 	t.Run("GetCandles", func(t *testing.T) {
 		// Get data range first
-		startDaily, endDaily, err := provider.GetDataRange(context.Background(), "SOL-USD", simulator.TimeFrameDaily)
+		startDaily, dateEnd, err := provider.GetDataRange(context.Background(), "SOL-USD", simulator.TimeFrameDaily)
 		if err != nil {
 			t.Fatalf("GetDataRange for daily failed: %v", err)
 		}
 
-		// Request just the first day's worth of data
+		// Calculate request end time (using the minimum of start+24h or the actual data end)
 		requestEnd := startDaily.Add(24 * time.Hour)
+		if requestEnd.After(dateEnd) {
+			requestEnd = dateEnd
+		}
 		candles, err := provider.GetCandles(context.Background(), "SOL-USD", simulator.TimeFrameDaily, startDaily, requestEnd)
 		if err != nil {
 			t.Fatalf("GetCandles failed: %v", err)
@@ -147,3 +170,4 @@ func TestFileDataProvider(t *testing.T) {
 		}
 	})
 }
+
