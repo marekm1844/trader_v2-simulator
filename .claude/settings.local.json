@@ -3,7 +3,18 @@
     "allow": [
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(mkdir:*)",
+      "mcp__Gorilla_Websocket_Docs__fetch_websocket_documentation",
+      "mcp__Gorilla_Websocket_Docs__search_websocket_documentation",
+      "mcp__Gorilla_Websocket_Docs__search_websocket_code",
+      "mcp__Gorilla_Websocket_Docs__fetch_generic_url_content",
+      "Bash(go mod:*)",
+      "Bash(ls:*)",
+      "Bash(go test:*)",
+      "Bash(go get:*)",
+      "Bash(go install:*)",
+      "Bash(golangci-lint run:*)"
     ],
     "deny": []
   }

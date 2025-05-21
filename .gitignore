@@ -43,3 +43,8 @@ data/
 
 # Ignore configs (optional, if you want to keep repo clean)
 configs/
+
+#I Ignore claude 
+.claude/
+.Tasks/
+*CLAUDE.md

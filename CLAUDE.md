@@ -8,6 +8,10 @@ The trader_v2-simulator is a Go-based cryptocurrency trading simulator that uses
 For websocet we are using gorilla library.
 The project focuses on SOL-USD trading pairs with both daily and hourly price candles.
 
+## Go Lang codding
+
+Coding rules are in @.claude/rules/go-rule.md
+
 ## Repository Structure
 
 - `configs/`: Configuration files for the simulator
